@@ -1,56 +1,65 @@
 // src/main.js
 import { Engine } from './engine/Engine.js';
-import { AssetLoader } from './utils/AssetLoader.js';
 import { SceneManager } from './scene/SceneManager.js';
+import { AssetLoader } from './utils/AssetLoader.js';   // <-- ONLY IMPORT NEEDED
 
 (async () => {
-  // 1️⃣  canvas + engine
+  // --------------------------------------------------------------
+  // 0️⃣  Create the canvas + the Engine (renderer + physics)
+  // --------------------------------------------------------------
   const canvas = document.createElement('canvas');
   document.body.appendChild(canvas);
   const engine = new Engine(canvas);
 
-  // 2️⃣  gestor de assets (aunque en este demo no usamos assets externos)
-  const assetLoader = new AssetLoader();
-
-  // 3️⃣  Se crean los objetos que necesitamos (cabin, duende, …)
-  //    En este ejemplo los generamos proceduralmente, así que no
-  //    cargamos nada. Si más adelante quieres cargar .glb, usar:
-  //    const cabin = await assetLoader.load('/assets/models/cabin.glb');
-  const manager = new SceneManager(engine.scene, engine.getPhysicsWorld(), engine.renderer);
-  await manager.init();                     // crea la habitación, el duende, etc.
-  engine.scene.add(manager.room.root);      // añadimos la habitación (ya está en el manager)
+  // --------------------------------------------------------------
+  // 1️⃣  Asset loader (only used if you later want to load external GLTF/textures)
+  // --------------------------------------------------------------
+  const assetLoader = new AssetLoader(); // <-- instantiate once
 
   // --------------------------------------------------------------
-  // 4️⃣ BUCLE DE REPRENDER (el mismo que en la demo completa)
+  // 2️⃣  Build the scene (room, duende, interactive objects)
+  // --------------------------------------------------------------
+  const manager = new SceneManager(
+    engine.scene,
+    engine.getPhysicsWorld(),
+    engine.renderer
+  );
+  await manager.init();                     // builds cabin, duende, lights...
+
+  // If you have external models you want to load later, do:
+  // const cabin = await assetLoader.load('/assets/models/cabin.glb');
+  // engine.scene.add(cabin);
+
+  // --------------------------------------------------------------
+  // 3️⃣  Render loop (fixed‑step physics + render)
   // --------------------------------------------------------------
   let last = performance.now();
   function animate(now) {
     const dt = (now - last) / 1000;
     last = now;
-    // paso físico fijo a 1/60
-    const fixed = 1 / 60;
+    // ---- fixed‑step physics at 60 Hz ----
+    const fixedStep = 1 / 60;
     let accumulator = dt;
-    while (accumulator >= fixed) {
-      engine.getPhysicsWorld().step(fixed);
-      accumulator -= fixed;
+    while (accumulator >= fixedStep) {
+      engine.getPhysicsWorld().step(fixedStep);
+      accumulator -= fixedStep;
     }
-    // actualizar animaciones y lógica
+    // ---- update animations / interactive objects ----
     if (window._sceneMgr) window._sceneMgr.update();
-    // render
+    // ---- render the frame ----
     engine.renderer.render();
     requestAnimationFrame(animate);
   }
   requestAnimationFrame(animate);
 
   // --------------------------------------------------------------
-  // 5️⃣ Atajos de teclado para probar interacción desde el
-  //    navegador (O = abrir puerta, P = jugar con el juguete)
+  // 4️⃣  Simple keyboard shortcuts (optional)
   // --------------------------------------------------------------
   window.addEventListener('keydown', e => {
     const k = e.key.toLowerCase();
     if (k === 'o') {
-      const firstDoor = window._sceneMgr?.interactive?.objects?.find(o => o instanceof Door);
-      if (firstDoor) firstDoor.toggle?.();
+      const door = window._sceneMgr?.interactive?.objects?.find(o => o instanceof Door);
+      if (door) door.toggle?.();
     }
     if (k === 'p') {
       const toy = window._sceneMgr?.interactive?.objects?.find(o => o instanceof Toy);

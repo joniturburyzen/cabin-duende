@@ -5,18 +5,31 @@ export class AssetLoader extends THREE.LoadingManager {
     this.cache = new Map(); // url → THREE.Group (or Texture)
   }
 
-  /** Carga un GLTF y lo cachea */
+  /**
+   * Load a GLTF (or any other URL) and cache the resulting scene.
+   * @param {string} url
+   * @returns {Promise<THREE.Group>}
+   */
   async load(url) {
     if (this.cache.has(url)) return this.cache.get(url);
     const loader = new THREE.GLTFLoader();
-    const scene = await new Promise((res, rej) =>
-      loader.load(url, g => res(g.scene), undefined, e => rej(e))
+    const scene = await new Promise((resolve, reject) =>
+      loader.load(
+        url,
+        g => resolve(g.scene),
+        undefined,
+        err => reject(err)
+      )
     );
     this.cache.set(url, scene);
     return scene;
   }
 
-  /** Carga una textura y la marca como sRGB */
+  /**
+   * Load a texture and force sRGB encoding.
+   * @param {string} url
+   * @returns {THREE.Texture}
+   */
   loadTexture(url) {
     const tex = new THREE.TextureLoader().load(url);
     tex.encoding = THREE.sRGBEncoding;

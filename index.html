@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Cabin of the Duende – GitHub Pages Demo</title>
+<style>
+  body { margin:0; overflow:hidden; background:#111; }
+  canvas { display:block; }
+</style>
+</head>
+<body>
+<script type="module">
+/* ==============================================================
+   ===   ALL THE CODE FROM THE PREVIOUS ANSWER, BUT WITH TWO
+   ===       MODIFICATIONS (so it works without external assets):
+   ===   1️⃣  We *generate* the cabin geometry on the fly.
+   ===   2️⃣  The duende is a tiny procedural mesh with a few
+   ===       key‑frame animations created in JavaScript.
+   ============================================================== */
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.158/build/three.module.js';
+import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.158/examples/jsm/controls/OrbitControls.js';
+import { CANNON } from 'https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js';
+import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.158/examples/jsm/loaders/GLTFLoader.js';
+import { RGBELoader } from 'https://cdn.jsdelivr.net/npm/three@0.158/examples/jsm/loaders/RGBELoader.js';
+
+// ---------------------------------------------------------------
+// 1️⃣  UTILITIES
+// ---------------------------------------------------------------
+class AssetLoader extends THREE.LoadingManager{
+  constructor(){ super(); this.cache = new Map(); }
+  async load(url){
+    if (this.cache.has(url)) return this.cache.get(url);
+    const loader = new GLTFLoader();
+    const scene = await new Promise((res,rej)=>
+      loader.load(url,(g)=>{res(g.scene);},undefined,(e)=>{rej(e);})
+    );
+    this.cache.set(url,scene);
+    return scene;
+  }
+  loadTexture(url){
+    const tex = new THREE.TextureLoader().load(url);
+    tex.encoding = THREE.sRGBEncoding;
+    return tex;
+  }
+}
+class Debug{ enable(){ const s=document.createElement('script'); s.src='https://mrdoob.github.io/stats.js/build/stats.min.js'; document.body.appendChild(s); } }
+// ---------------------------------------------------------------
+// 2️⃣  ENGINE (renderer + physics)
+// ---------------------------------------------------------------
+class Engine{
+  constructor(canvas,opts={}){
+    this.canvas=canvas;
+    this.renderer = new THREE.WebGLRenderer({canvas,antialias:true});
+    this.renderer.setPixelRatio(window.devicePixelRatio);
+    this.renderer.setSize(canvas.clientWidth,canvas.clientHeight);
+    this.renderer.outputEncoding = THREE.sRGBEncoding;
+    this.renderer.toneMapping = THREE.ACESCWorkerToneMapping;
+    this.scene = new THREE.Scene();
+    this.scene.background = 0x111111;
+    this.physicsWorld = new CANNON.World({gravity:(0,-9.81,0)});
+    this.physicsWorld.broadphase = new CANNON.NaiveBroadphase();
+    this.physicsWorld.solver.iterations = 12;
+    // camera
+    this.camera = new THREE.PerspectiveCamera(90,canvas.clientWidth/canvas.clientHeight,0.1,1000);
+    this.camera.position.set(0,1.6,3);
+    this.camera.aspect = canvas.clientWidth/canvas.clientHeight;
+    this.camera.updateProjectionMatrix();
+    // controls – first‑person
+    this.controls = new OrbitControls(this.camera,canvas);
+    this.controls.enableDamping = true;
+    this.controls.dampingFactor = 0.05;
+    this.controls.enablePan = false;
+    this.controls.minDistance = 1.2;
+    this.controls.maxDistance = 15;
+    this.controls.update();
+    window.addEventListener('resize',()=>this._onResize());
+  }
+  _onResize(){
+    const w = window.innerWidth, h = window.innerHeight;
+    this.renderer.setSize(w,h);
+    this.camera.aspect = w/h;
+    this.camera.updateProjectionMatrix();
+  }
+  /** expose helpers */
+  getRenderer(){ return this.renderer; }
+  getPhysicsWorld(){ return this.physicsWorld; }
+}
+class Renderer{
+  constructor(canvas,engine){ this.engine=engine; }
+  render(){ this.engine.renderer.render(this.engine.scene,this.engine.camera); }
+}
+
+// ---------------------------------------------------------------
+// 3️⃣  SCENE MANAGER
+// ---------------------------------------------------------------
+class SceneManager{
+  /** @param {THREE.Scene} scene @param {CANNON.World} world @param {Renderer} renderer */
+  constructor(scene,world,renderer){
+    this.scene=scene; this.world=world; this.renderer=renderer;
+    this.room=null; this.duende=null; this.interactive=null;
+  }
+  async init(){
+    // ---- room (built from primitives) -------------------------
+    this.room = new Room(this.scene,this.world);
+    this.scene.add(this.room.root);
+    // ---- interactive objects (doors, levers, toys) -------------
+    this.interactive = new InteractiveObjects(this.scene,this.world);
+    this.interactive.addTo(this.room.root);
+    // ---- duende (procedural tiny creature) --------------------
+    const duendeMesh = await this._createProceduralDuende();
+    this.duende = new Duende(this.scene,this.world,duendeMesh);
+    this.scene.add(this.duende.mesh);
+    // ---- camera follows duende -------------------------------
+    this._followCamera();
+    // expose for debugging UI shortcuts
+    window._sceneMgr = this;
+  }
+  _followCamera(){
+    const cm=this.controls, duende=this.duende;
+    const offset = new THREE.Vector3(0,1.6,3);
+    const orig = this.controls.update;
+    this.controls.update = ()=> {
+      const target = duende.mesh.position.clone().add(offset);
+      const cur = cm.camera.position.clone();
+      cur.lerp(target,0.1);
+      cm.camera.position.copy(cur);
+      orig.call(cm);
+    };
+  }
+  async _createProceduralDuende(){
+    // Very small “duende” – a sphere body + a simple sprite‑style mesh
+    const geo = new THREE.SphereGeometry(0.2,12,12);
+    const mat = new THREE.MeshStandardMaterial({
+      color:0x8bc34a, metalness:0, roughness:0.6,
+    });
+    const mesh = new THREE.Mesh(geo,mat);
+    mesh.castShadow = mesh.receiveShadow = true;
+    // add a tiny animation (scale pulse) – no external GLTF needed
+    const mixer = new THREE.AnimationMixer(mesh);
+    const clip = new THREE.AnimationClip('.duendePulse');
+    const times = new THREE.KeyframeTrack(
+      'scale',
+      THREE.Vector3.zero(),
+      [0,0.12,0.24,0.36,0.48,0.6,0.72,0.84,0.96,1],
+      [1,1.08,1.08,1.08,1.08,1.08,1.08,1.08,1.08,1]
+    );
+    mixer.clipAction(clips[0]).play();
+    mixer.time = 0;
+    mesh.userData.mixer = mixer;
+    mesh.tick = (delta)=> mixer.tick(delta);
+    return mesh;
+  }
+  update(){
+    if (this.interactive) this.interactive.update();
+    if (this.duende){
+      this.duende.mesh.tick?.(0.016);
+      this.duende.update();
+    }
+  }
+  _setupCameraFollow(){ /* same as in the long version – omitted for brevity */ }
+}
+class Duende{
+  /** @param {THREE.Scene} scene @param {CANNON.World} world @param {THREE.Group} root */
+  constructor(scene,world,root){
+    /** @type {THREE.Group} */
+    this.mesh = root.clone();
+    // create capsule collider around the whole duende
+    const caps = new CANNON.Capsule(0.2,0.5);
+    const body = new CANNON.Body({mass:30,shape:caps});
+    body.position.copy(this.mesh.position);
+    body.quaternion.copy(this.mesh.quaternion);
+    world.addBody(body);
+    this.mesh.userData.physicsBody = body;
+    // animation mixer (for the tiny pulse we added above)
+    this.mixer = this.mesh.userData.mixer;
+  }
+  update(){
+    if (this.mixer) this.mixer.tick(0.016);
+    this._step?.();
+  }
+  async play(name){ /* no external clips – placeholder */ }
+}
+class DuendeController{
+  /** @param {THREE.Group} mesh @param {CANNON.World} world */
+  constructor(mesh,world){
+    this.mesh=mesh; this.body=mesh.userData.physicsBody;
+    this.world=world;
+    // capture WASD + Space
+    this.keys={w:false,a:false,s:false,d:false,Space:false};
+    window.addEventListener('keydown',e=>{const k=e.key.toLowerCase(); if(k in this.keys) this.keys[k]=true;});
+    window.addEventListener('keyup',e=>{const k=e.key.toLowerCase(); if(k in this.keys) this.keys[k]=false;});
+    // step will be called by SceneManager each frame
+    this._step = ()=>this._stepPhysics();
+  }
+  _stepPhysics(){
+    const cam=window._sceneMgr?.renderer?.camera;
+    if (!cam) return;
+    const forward=new THREE.Vector3(); cam.getWorldDirection(forward); forward.y=0; forward.normalize();
+    const right=new THREE.Vector3(); right.crossVectors(cam.up,forward); right.normalize();
+    // WASD movement
+    let move=new CANNON.Vec3(0,0,0);
+    if (this.keys.w) move=move.add(forward);
+    if (this.keys.s) move=move.sub(forward);
+    if (this.keys.a) move=move.sub(right);
+    if (this.keys.d) move=move.add(right);
+    move.normalize();
+    const accel=25, maxSpeed=6;
+    const imp = move.scale(accel*0.016);
+    this.body.velocity.vadd(imp);
+    if (this.body.velocity.length()>maxSpeed) this.body.velocity.scale(maxSpeed/this.body.velocity.length());
+    // Jump (Space)
+    if (this.keys.Space && this._grounded()){
+      this.body.velocity.y+=12;
+    }
+    // friction
+    this.body.velocity.scale(Math.pow(1-30*0.016,1));
+    // sync visual mesh
+    this.mesh.position.copy(this.body.position);
+    this.mesh.quaternion.copy(this.body.quaternion);
+  }
+  _grounded(){
+    const from=new THREE.Vector3(this.body.position.x,this.body.position.y+0.1,this.body.position.z);
+    const to  =new THREE.Vector3(this.body.position.x,-0.5,this.body.position.z);
+    const ray = new CANNON.Ray(from,to.sub(from));
+    const hit = this.world.rayTest(ray);
+    return hit && hit.fraction<=1;
+  }
+}
+class InteractiveObjects{
+  /** @param {THREE.Scene} scene @param {CANNON.World} world */
+  constructor(scene,world){
+    this.scene=scene; this.world=world; this.objects=[];
+  }
+  addTo(root){
+    const walk=(obj)=>{
+      if (!obj.userData.interactive) return;
+      const name = obj.name.toLowerCase();
+      if (/door/.test(name)){
+        const d=new Door(scene,world,obj);
+        this.objects.push(d);
+      }else if (/lever/.test(name)){
+        const l=new Lever(scene,world,obj);
+        this.objects.push(l);
+      }else if (/toy/.test(name)){
+        const t=new Toy(scene,world,obj);
+        this.objects.push(t);
+      }else obj.children.forEach(walk);
+    };
+    root.traverse(walk);
+  }
+  update(){ this.objects.forEach(o=>o.update()); }
+}
+class Door{
+  /** @param {THREE.Scene} scene @param {CANNON.World} world @param {THREE.Mesh} mesh */
+  constructor(scene,world,mesh){
+    this.group = new THREE.Group(); this.group.add(mesh);
+    // rotate around Y when clicked
+    const toggle = ()=> {
+      const cur = this.group.rotation.y;
+      const target = cur === 0 ? Math.PI/2 : 0;
+      const anim = new AnimatedBox(this.group.children[0],{duration:500,axis:'y'});
+      anim.play().then(()=>{/* nothing */});
+    };
+    const canvas = scene.canvas || document.querySelector('canvas');
+    canvas.addEventListener('click',ev=>{
+      const mx = (ev.clientX/canvas.clientWidth)*2-1;
+      const my = -(ev.clientY/canvas.clientHeight)*2+1;
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(new THREE.Vector2(mx,my),scene.camera);
+      if (ray.intersectObject(this.group).length) toggle();
+    });
+  }
+  update(){}
+}
+class Lever{
+  constructor(scene,world,mesh){
+    this.group = new THREE.Group(); this.group.add(mesh);
+    const toggle = ()=> {
+      const cur = this.group.rotation.x;
+      const target = cur === 0 ? Math.PI/4 : 0;
+      const anim = new AnimatedBox(this.group.children[0],{duration:400,axis:'x'});
+      anim.play();
+    };
+    const canvas = scene.canvas || document.querySelector('canvas');
+    canvas.addEventListener('click',ev=>{
+      const mx = (ev.clientX/canvas.clientWidth)*2-1;
+      const my = -(ev.clientY/canvas.clientHeight)*2+1;
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(new THREE.Vector2(mx,my),scene.camera);
+      if (ray.intersectObject(this.group).length) toggle();
+    });
+  }
+  update(){}
+}
+class Toy{
+  /** @param {THREE.Scene} scene @param {CANNON.World} world @param {THREE.Mesh} mesh */
+  constructor(scene,world,mesh){
+    this.group = new THREE.Group(); this.group.add(mesh);
+    const shape = new CANNON.Sphere(0.25);
+    const body = new CANNON.Body({mass:1,shape});
+    body.position.copy(mesh.position);
+    world.addBody(body);
+    mesh.userData.physicsBody = body;
+    // interaction helper
+    this.interactor = new ToyInteraction(this,world);
+  }
+  interactWithDuende(){ 
+    const imp = new CANNON.Vec3(
+      (Math.random()-0.5)*4,
+      0,
+      (Math.random()-0.5)*4
+    );
+    this.body.applyImpulse(imp,this.body.position);
+  }
+  update(){}
+}
+class ToyInteraction{
+  constructor(toy,world){ this.toy=toy; this.world=world; }
+  play(){ this.toy.interactWithDuende(); }
+}
+class AnimatedBox{
+  /** @param {THREE.Mesh} mesh @param {Object} opts {duration,axis:'x'|'y'|'z'} */
+  constructor(mesh,opts={}){
+    this.mesh = mesh; this.opts=opts; this.axis=opts.axis||'x';
+    this._animate();
+  }
+  _animate(){
+    const start = this.mesh.rotation[this.axis]||0;
+    const end   = start + Math.PI/2;
+    const dur   = this.opts.duration||400;
+    const ease  = t=> t<0.5?2*t*t:-1+(4-2*t)*t;
+    let elapsed=0;
+    const step = (now)=>{
+      elapsed+=now;
+      const prog = Math.min(elapsed/dur,1);
+      const eased = ease(prog);
+      this.mesh.rotation.set(0,0,0);
+      this.mesh.rotation[this.axis] = start+(end-start)*eased;
+      if (prog<1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+}
+class Room{
+  /** @param {THREE.Scene} scene @param {CANNON.World} world */
+  constructor(scene,world){
+    /** @type {THREE.Group} */
+    this.root = new THREE.Group();
+    scene.add(this.root);
+    // ---- floor -------------------------------------------------
+    const floorGeom = new THREE.PlaneGeometry(20,20);
+    const floorMat  = new THREE.MeshStandardMaterial({
+      color:0x5d4037,
+    });
+    const floor = new THREE.Mesh(floorGeom,floorMat);
+    floor.rotation.set(-Math.PI/2,0,0);
+    floor.receiveShadow = true;
+    this.root.add(floor);
+    this._staticCollider(floor);
+    // ---- a few simple decorative meshes (door, lever, toy) ----
+    this._addDecoration();
+    // ---- lighting ------------------------------------------------
+    this._addLighting();
+  }
+  _staticCollider(mesh){
+    const bbox = new THREE.Box3().setFromObject(mesh);
+    const size = new THREE.Vector3(); bbox.getSize(size);
+    const half = size.clone().multiplyScalar(0.5);
+    const shape = new CANNON.Box(new CANNON.Vec3(half.x,half.y,half.z));
+    const body = new CANNON.Body({mass:0,shape});
+    body.position.copy(mesh.position);
+    body.quaternion.copy(mesh.quaternion);
+    world.addBody(body);
+    mesh.userData.physicsBody = body;
+  }
+  _addDecoration(){
+    // ----- a door‑like plank (named "door") -----
+    const doorGeo = new THREE.BoxGeometry(0.8,2.2,0.1);
+    const doorMat = new THREE.MeshStandardMaterial({color:0x8b5e3c});
+    const door = new THREE.Mesh(doorGeo,doorMat);
+    door.position.set(-3,1,2);
+    door.name = 'door';
+    this.root.add(door);
+    // simple collider for the door
+    this._staticCollider(door);
+    // ----- a lever (named "lever") -----
+    const leverGeo = new THREE.BoxGeometry(0.2,1,0.5);
+    const leverMat = new THREE.MeshStandardMaterial({color:0x795548});
+    const lever = new THREE.Mesh(leverGeo,leverMat);
+    lever.position.set(0,1.2,-2);
+    lever.name = 'lever';
+    this.root.add(lever);
+    this._staticCollider(lever);
+    // ----- a toy (named "toy") -----
+    const toyGeo = new THREE.SphereGeometry(0.5,12,12);
+    const toyMat = new THREE.MeshStandardMaterial({color:0xffeb3b});
+    const toy = new THREE.Mesh(toyGeo,toyMat);
+    toy.position.set(2,0.5,0);
+    toy.name = 'toy';
+    this.root.add(toy);
+  }
+  _addLighting(){
+    const amb = new THREE.AmbientLight(0xffb86c,1.5); this.root.add(amb);
+    const point = new THREE.PointLight(0xffd8a6,1.2,12); point.position.set(0,3,0); this.root.add(point);
+    const spot = new THREE.SpotLight(0xffb86c,2,15,30,0.4,2);
+    spot.position.set(0,2.5,2); spot.angle=Math.PI/6; spot.penumbra=0.6;
+    spot.castShadow=true; spot.shadow.mapSize.set(1024,1024);
+    this.root.add(spot);
+    this.root.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
+  }
+}
+class DefaultInterior{
+  /* not needed – everything is built directly in Room */
+}
+class AssetLoader extends THREE.LoadingManager{
+  constructor(){ super(); this.cache = new Map(); }
+  async load(url){ /* not used – we never load external glTF */ }
+  loadTexture(url){ /* not used */ }
+}
+
+/* ==============================================================
+   4️⃣  BOOTSTRAP – same logic as the long version, just a tiny
+   ============================================================== */
+const canvas = document.createElement('canvas');
+document.body.appendChild(canvas);
+const engine = new Engine(canvas);
+const renderer = new Renderer(canvas,engine);
+engine.scene.add(renderer.camera); // camera lives in the Engine
+
+let last = performance.now();
+function animate(now){
+  const dt = (now-last)/1000;
+  last = now;
+  // ----- fixed‑step physics (1/60) -----
+  const fixed = 1/60;
+  let acc = dt;
+  while (acc >= fixed){
+    engine.getPhysicsWorld().step(fixed);
+    acc -= fixed;
+  }
+  // ----- update scene (animations, interactables) -----
+  if (window._sceneMgr) window._sceneMgr.update();
+  // ----- render -----
+  renderer.render();
+  requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+
+/* --------------------------------------------------------------
+   OPTIONAL: press “O” to open the first door, “P” to make the
+   duende “play” with the toy.
+-------------------------------------------------------------- */
+window.addEventListener('keydown',e=>{
+  const k = e.key.toLowerCase();
+  if (k==='o'){
+    const firstDoor = window._sceneMgr?.interactive?.objects?.find(o=>o instanceof Door);
+    if (firstDoor) firstDoor.toggle?.();
+  }
+  if (k==='p'){
+    const toy = window._sceneMgr?.interactive?.objects?.find(o=>o instanceof Toy);
+    if (toy?.interactor) toy.interactor.play?.();
+  }
+});
+</script>
+</body>
+</html>
